@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,7 @@ const (
 	driverTypeKey            = "driverType"
 	useUnsafeStringReaderKey = "useUnsafeStringReader"
 	driverBufferSizeKey      = "bufferSize"
+	OutFilePathKey           = "out_file_path"
 	defaultBufferSize        = 512
 )
 
@@ -46,20 +48,48 @@ func (d DriverType) String() string {
 	return ""
 }
 
-func (d DriverType) PrepareRows(result *chdbstable.LocalResult, buf []byte, bufSize int, useUnsafe bool) (driver.Rows, error) {
+func (d DriverType) PrepareRows(result *chdbstable.LocalResult, buf []byte, bufSize int, useUnsafe bool, outFilePath string) (driver.Rows, error) {
+	var fl *os.File
+	var err error
 	switch d {
 	case ARROW:
-		reader, err := ipc.NewFileReader(bytes.NewReader(buf))
-		if err != nil {
-			return nil, err
+		var reader *ipc.FileReader
+		if outFilePath != "" {
+			fl, err = os.Open(outFilePath)
+			if err != nil {
+				return nil, err
+			}
+			reader, err = ipc.NewFileReader(fl)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			reader, err = ipc.NewFileReader(bytes.NewReader(buf))
+			if err != nil {
+				return nil, err
+			}
 		}
-		return &arrowRows{localResult: result, reader: reader}, nil
+
+		return &arrowRows{localResult: result, flHandle: fl, reader: reader}, nil
 	case PARQUET:
-		reader := parquet.NewGenericReader[any](bytes.NewReader(buf))
+		var reader *parquet.GenericReader[any]
+
+		if outFilePath != "" {
+			fl, err = os.Open(outFilePath)
+			if err != nil {
+				return nil, err
+			}
+			reader = parquet.NewGenericReader[any](fl)
+
+		} else {
+			reader = parquet.NewGenericReader[any](bytes.NewReader(buf))
+
+		}
 		return &parquetRows{
 			localResult: result, reader: reader,
 			bufferSize: bufSize, needNewBuffer: true,
 			useUnsafeStringReader: useUnsafe,
+			flHandle:              fl,
 		}, nil
 	}
 	return nil, fmt.Errorf("Unsupported driver type")
@@ -323,6 +353,18 @@ func (c *conn) compileArguments(query string, args []driver.NamedValue) (string,
 	return compiledQuery, nil
 }
 
+func getOutFileFromContext(ctx context.Context) string {
+	p := ctx.Value(OutFilePathKey)
+	var out_file_path string
+	if p != nil {
+		s, ok := p.(string)
+		if ok {
+			out_file_path = s
+		}
+	}
+	return out_file_path
+}
+
 func (c *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	compiledQuery, err := c.compileArguments(query, args)
 	if err != nil {
@@ -332,12 +374,12 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if err != nil {
 		return nil, err
 	}
-
+	out_file_path := getOutFileFromContext(ctx)
 	buf := result.Buf()
-	if buf == nil {
+	if buf == nil && out_file_path == "" {
 		return nil, fmt.Errorf("result is nil")
 	}
-	return c.driverType.PrepareRows(result, buf, c.bufferSize, c.useUnsafe)
+	return c.driverType.PrepareRows(result, buf, c.bufferSize, c.useUnsafe, out_file_path)
 
 }
 
