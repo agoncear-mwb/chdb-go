@@ -82,6 +82,9 @@ func (d DriverType) PrepareRows(result *chdbstable.LocalResult, buf []byte, bufS
 			reader = parquet.NewGenericReader[any](fl)
 
 		} else {
+			if len(buf) == 0 {
+				return nil, fmt.Errorf("result is nil")
+			}
 			reader = parquet.NewGenericReader[any](bytes.NewReader(buf))
 
 		}
